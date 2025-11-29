@@ -1,4 +1,6 @@
 import logging
+import time
+from typing import Set
 
 from dotenv import load_dotenv
 
@@ -13,6 +15,8 @@ from livekit.agents import (
     cli,
     metrics,
     room_io,
+    AgentStateChangedEvent,
+    UserInputTranscribedEvent,
 )
 from livekit.agents.llm import function_tool
 from livekit.plugins import silero
@@ -25,21 +29,39 @@ logger = logging.getLogger("basic-agent")
 
 load_dotenv()
 
+def _parse_word_list(env_value: str | None, default: Set[str]) -> Set[str]:
+    if not env_value:
+        return default
+    return {w.strip().lower() for w in env_value.split(",") if w.strip()}
 
 class MyAgent(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions="Your name is Kelly. You would interact with users via voice."
+            instructions=("Your name is Kelly. You would interact with users via voice."
             "with that in mind keep your responses concise and to the point."
             "do not use emojis, asterisks, markdown, or other special characters in your responses."
             "You are curious and friendly, and have a sense of humor."
-            "you will speak english to the user",
+            "you will speak english to the user"),
         )
 
     async def on_enter(self):
         # when the agent is added to the session, it'll generate a reply
         # according to its instructions
         self.session.generate_reply()
+
+    @staticmethod
+    def soft_words() -> Set[str]:
+        from os import getenv
+
+        default = {"yeah", "ya", "ok", "okay", "hmm", "uh-huh", "uh", "mm", "right", "sure"}
+        return _parse_word_list(getenv("IGNORE_WORDS"), default)
+    
+    @staticmethod
+    def hard_words() -> Set[str]:
+        from os import getenv
+
+        default = {"stop", "wait", "hold", "holdon", "hold-on", "pause", "cancel", "no"}
+        return _parse_word_list(getenv("INTERRUPT_WORDS"), default)
 
     # all functions annotated with @function_tool will be passed to the LLM when this
     # agent is active
@@ -79,6 +101,14 @@ async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
+
+    # For Tracking speaking state
+    speaking_state = {
+        "agent_is_speaking": False,
+        "last_speaking_start": 0.0,
+        "last_speaking_end": 0.0,
+    }
+
     session = AgentSession(
         # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
         # See all available models at https://docs.livekit.io/agents/models/stt/
@@ -100,7 +130,87 @@ async def entrypoint(ctx: JobContext):
         # when it's detected, you may resume the agent's speech
         resume_false_interruption=True,
         false_interruption_timeout=1.0,
+        # Treating very short speech with few words as likely false
+        min_interruption_words=2,
     )
+
+    @session.on("agent_state_changed")
+    def _on_agent_state_changed(ev: AgentStateChangedEvent):
+        old = ev.old_state
+        new= ev.new_state
+        now=time.time()
+
+        logger.info(
+            f"Agent state changed: old_state='{old}' new_state='{new}' "
+            f"created at={ev.created_at}"
+        )
+
+        if new == "speaking":
+            speaking_state["agent_is_speaking"] = True
+            speaking_state["last_speaking_start"] = now
+        elif old == "speaking" and new != "speaking":
+            speaking_state["agent_is_speaking"] = False
+            speaking_state["last_speaking_end"] = now
+
+    # IntelliGent Interruption Handling
+    soft_words = MyAgent.soft_words()
+    hard_words = MyAgent.hard_words()
+
+    @session.on("user_input_transcribed")
+    def _on_user_input_transcribed(ev: UserInputTranscribedEvent):
+        # We only need to consider final transcripts from STT
+        if not ev.is_final:
+            return
+
+        text_raw = ev.transcript or ""
+        text = text_raw.strip().lower()
+        now=time.time()
+
+        if not text:
+            return
+
+        # Rough tokenization
+        tokens = [t.strip(".,!?;:") for t in text.split() if t.strip()]
+        token_set = set(tokens)
+
+        # Soft / hard detection (single words | multi-word phrases)
+        has_soft = any(t in soft_words for t in token_set)
+        has_hard = any(t in hard_words for t in token_set)
+
+        # "overlap" is when agent is speaking OR just finished speaking 
+        recently_spoke = now - speaking_state["last_speaking_end"] < 2.0
+        overlapping = speaking_state["agent_is_speaking"] or recently_spoke
+
+        logger.info(
+            "user_input_transcribed: %r (final=%s, overlapping=%s, soft=%s, hard=%s)",
+            text_raw,
+            ev.is_final,
+            overlapping,
+            has_soft,
+            has_hard,
+        )
+
+        # Hard interruption when the agent is speaking 
+
+        if overlapping and has_hard:
+            logger.info("Hard interrupt detected during/after agent speech -> interrupting")
+            # explicitly cut off any current speech; this also prevents auto-resume
+            session.interrupt()
+            return
+
+        # Backchannel while the agent is talking 
+        if overlapping and has_soft and not has_hard:
+            logger.debug(
+                "Soft backchannel during/after agent speech -> "
+                "clearing user turn and letting TTS continue"
+            )
+            # discard this overlapping mini-utterance so it doesn't
+            # start a new user turn or change the LLM context
+            session.clear_user_turn()
+            return
+
+        # When the agent is silent, it will be treated normally 
+        logger.debug("Agent silent or far from last speech -> normal handling")
 
     # log metrics as they are emitted, and total usage after session is over
     usage_collector = metrics.UsageCollector()
