@@ -15,19 +15,19 @@ This repository contains a complete implementation of a voice-enabled conversati
 
 ## 📁 Project Structure
 .
-├── basic_agent.py
-├── tools/
-│   ├── weather_tool.py
-│   ├── email_tool.py
-│   └── ...
-├── pipeline/
-│   ├── llm_node.py
-│   ├── tts_control.py
-│   └── turn_detector.py
-├── utils/
-│   ├── audio.py
-│   └── helpers.py
-└── README.md
+- ├── basic_agent.py
+- ├── tools/
+- │   ├── weather_tool.py
+- │   ├── email_tool.py
+- │   └── ...
+- ├── pipeline/
+- │   ├── llm_node.py
+- │   ├── tts_control.py
+- │   └── turn_detector.py
+- ├── utils/
+- │   ├── audio.py
+- │   └── helpers.py
+- └── README.md
 
 ## Installation
 
@@ -56,11 +56,11 @@ python basic_agent.py dev
 
 ## How it Works
 
-#🔹 1. Audio Input
+🔹 1. Audio Input
 
 LiveKit captures your voice → streams to ASR (OpenAI/Whisper).
 
-#🔹 2. Language Model
+🔹 2. Language Model
 
 User intent is processed by a realtime LLM with:
 
@@ -70,7 +70,7 @@ structured outputs
 
 interruption support
 
-#🔹 3. Tool Execution
+🔹 3. Tool Execution
 
 Depending on user queries, the agent may:
 
@@ -82,7 +82,7 @@ retrieve information
 
 generate content
 
-#🔹 4. Voice Response
+🔹 4. Voice Response
 
 TTS converts LLM output → real-time audio output.
 
